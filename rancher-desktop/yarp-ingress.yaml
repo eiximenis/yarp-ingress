@@ -1,0 +1,34 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: yarp-ingress
+spec:
+  selector:
+    matchLabels:
+      app: yarp-ingress
+  template:
+    metadata:
+      labels:
+        app: yarp-ingress
+    spec:
+      containers:
+      - name: yarp-controller
+        image: yarpingress:latest
+        imagePullPolicy: Never
+        resources:
+          limits:
+            memory: "128Mi"
+            cpu: "500m"
+        ports:
+        - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: yarp-ingress
+spec:
+  selector:
+    app: yarp-ingress
+  type: LoadBalancer
+  ports:
+  - port: 80
