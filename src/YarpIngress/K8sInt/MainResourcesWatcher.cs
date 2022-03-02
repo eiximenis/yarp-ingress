@@ -6,113 +6,58 @@ using YarpIngress.YarpIntegration;
 
 namespace YarpIngress.K8sInt
 {
-    public class MainResourcesWatcher : BackgroundService, IMainResourcesWatcher, IDisposable
+
+   /// <summary>
+   /// This class watches for global resources on ALL namespaces
+   /// </summary>
+    public class MainResourcesWatcher : BackgroundService
     {
-        public YarpConfiguration YarpConfig { get; }
-        public IKubernetes Client { get; }
+        private readonly YarpConfiguration _yarpConfig;
+        private readonly IKubernetes _client;
         private readonly ILogger _logger;
-        private readonly ConcurrentDictionary<string, NamespaceServiceEndpointsWatcher> _endpointsWatcher;
-        private readonly Dictionary<string, IngressProcessor> _ingressWatchers;
-
-        private readonly ConcurrentDictionary<string, NamespaceServicesWatcher> _serviceWatchers;
         private readonly YarpConfigurationProvider _configProvider;
+        private readonly IngressWatcher _ingressWatcher;
+        private readonly ServicesWatcher _servicesWatcher;
+        private readonly EndpointsWatcher _endpointsWatcher;
+        private readonly Reconciler _reconciler;
 
-        public MainResourcesWatcher(ILogger<MainResourcesWatcher> logger, YarpConfigurationProvider configProvider)
+        public MainResourcesWatcher(ILoggerFactory loggerFactory, IKubernetesClientFactory k8sClientFactory, YarpConfigurationProvider configProvider)
         {
             _configProvider = configProvider;
-            var k8sconfig = KubernetesClientConfiguration.IsInCluster() ? KubernetesClientConfiguration.InClusterConfig() : KubernetesClientConfiguration.BuildConfigFromConfigFile();             
-            Client = new Kubernetes(k8sconfig);
-            YarpConfig = _configProvider.GetYarpConfiguration();
-            _logger = logger;
-            _ingressWatchers = new Dictionary<string, IngressProcessor>();
-            _endpointsWatcher = new ConcurrentDictionary<string, NamespaceServiceEndpointsWatcher>();
-            _serviceWatchers = new ConcurrentDictionary<string, NamespaceServicesWatcher>();
+            _logger = loggerFactory.CreateLogger<MainResourcesWatcher>();
+            _yarpConfig = _configProvider.GetYarpConfiguration();
+            _client = k8sClientFactory.GetClient();
+            _ingressWatcher = new IngressWatcher(k8sClientFactory, loggerFactory);
+            _servicesWatcher = new ServicesWatcher(k8sClientFactory, loggerFactory);
+            _endpointsWatcher = new EndpointsWatcher(k8sClientFactory, loggerFactory);
+            _reconciler = new Reconciler(loggerFactory, k8sClientFactory, configProvider);
         }
 
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
-            var ingressRespTask = Client.ListIngressForAllNamespacesWithHttpMessagesAsync(watch: true);
-            ingressRespTask.Watch<V1Ingress, V1IngressList>(OnIngressWatch);
+            _ingressWatcher.OnIngressCreated += (_, ingress) => _reconciler.OnIngressCreated(ingress);
+            _ingressWatcher.OnIngressUpdated += (_, ingress) => _reconciler.OnIngressUpdated(ingress);
+            _ingressWatcher.OnIngressRemoved += (_, ingress) => _reconciler.OnIngressRemoved(ingress);
+
+            _servicesWatcher.OnServiceCreated += (_, svc) => _reconciler.OnServiceCreated(svc);
+            _servicesWatcher.OnServiceUpdated += (_, svc) => _reconciler.OnServiceUpdated(svc);
+            _servicesWatcher.OnServiceRemoved += (_, svc) => _reconciler.OnServiceRemoved(svc);
+
+            _endpointsWatcher.OnEndpointsCreated += (_, ep) => _reconciler.OnEndpointsCreated(ep);
+            _endpointsWatcher.OnEndpointsUpdated += (_, ep) => _reconciler.OnEndpointsUpdated(ep);
+            _endpointsWatcher.OnEndpointsRemoved += (_, ep) => _reconciler.OnEndpointsRemoved(ep);
+
+            _ingressWatcher.Start();
+            _servicesWatcher.Start();
+            _endpointsWatcher.Start();
 
             while (true)
             {
                 await Task.Delay(1500);
-                YarpConfig.TriggerConfigurationChangeIfNeeded();
+                _yarpConfig.TriggerConfigurationChangeIfNeeded();
             }
         }
 
-        private void OnIngressWatch(WatchEventType type, V1Ingress item)
-        {
-            _logger.LogInformation($"Ingress watch event {type} on ingress {item.Name()}");
-
-            if (!item.IsForMe())
-            {
-                _logger.LogInformation($"Ignored ingress {item.Name()} because its not for yarp ingress controller");
-                return;
-            }
-
-            var name = item.Metadata.Name;
-            var ns = item.Metadata.NamespaceProperty;
-            if (string.IsNullOrEmpty(ns)) { ns = "default"; }
-            var key = $"{name}:{ns}";
-            switch (type)
-            {
-                case WatchEventType.Added:
-                    {
-                        var watcher = new IngressProcessor(item, this);
-                        _ingressWatchers.Add(key, watcher);
-                        _logger.LogInformation($"Starting ingress watcher for {key}");
-                        watcher.Start().ContinueWith(t =>
-                        {
-                            _logger.LogInformation($"Started ingress watcher for {key}");
-                        });
-                        break;
-                    }
-                case WatchEventType.Deleted:
-                    {
-                        if (_ingressWatchers.ContainsKey(key))
-                        {
-                            _ingressWatchers.Remove(key);
-                        }
-                        break;
-                    }
-            }
-        }
-
-
-        private void OnServicesWatch(WatchEventType type, V1Service item)
-        {
-            _logger.LogInformation($"Service watch event {type} on service {item.Name()}");
-        }
-
-
-
-        public override void Dispose()
-        {
-            Client.Dispose();
-        }
-
-
-
-        async Task<SingleServiceEndpointsWatcher> IMainResourcesWatcher.GetOrAddWatcherForServiceEndpoints(string ns, string name)
-        {
-            var nsWatcher = _endpointsWatcher.GetValueOrDefault(ns);
-            if (nsWatcher is not null)
-            {
-                return nsWatcher.GetOrAddWatcherForServiceEndpoints(name);
-            }
-            return await AddWatcherForServiceEndpoints(ns, name);
-        }
-
-        private async Task<SingleServiceEndpointsWatcher> AddWatcherForServiceEndpoints(string ns, string name)
-        {
-            _logger.LogInformation($"Adding watcher for endpoints of namespace {ns}");
-
-            var nsWatcher = new NamespaceServiceEndpointsWatcher(ns, this);
-            var singleWatcher = nsWatcher.GetOrAddWatcherForServiceEndpoints(name);
-            await nsWatcher.Start();
-            return singleWatcher;
-        }
     }
 }

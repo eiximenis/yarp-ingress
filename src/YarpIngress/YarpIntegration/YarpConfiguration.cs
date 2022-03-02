@@ -1,6 +1,8 @@
 ﻿using k8s.Models;
 using Microsoft.Extensions.Primitives;
 using Yarp.ReverseProxy.Configuration;
+using YarpIngress.Extensions;
+using YarpIngress.K8sInt;
 
 namespace YarpIngress.YarpIntegration
 {
@@ -18,22 +20,15 @@ namespace YarpIngress.YarpIntegration
             _clusters = new List<ClusterConfig>();
         }
 
-        public IngressConfig FillDataFrom(V1Ingress ingress)
+        public IngressConfig FillDataFrom(V1Ingress ingress, IK8sObjectsDefinitionsProvider serviceDefinitionsProvider)
         {
-            var ns = string.IsNullOrEmpty(ingress.Namespace()) ? "default" : ingress.Namespace();
             foreach (var rule in ingress.Spec.Rules)
             {
                 foreach (var path in rule.Http.Paths)
                 {
                     var cluster = new ClusterConfig()
                     {
-                        Destinations = new  Dictionary<string, DestinationConfig>
-                        {
-                            ["service"] = new DestinationConfig()
-                            {
-                                Address = $"http://{path.Backend.Service.Name}.{ns}.svc.cluster.local:{path.Backend.Service.Port.Number}"
-                            }
-                        },
+                        Destinations = GetDestinations(ingress, path, serviceDefinitionsProvider),
                         ClusterId = Guid.NewGuid().ToString()
                     };
 
@@ -53,6 +48,73 @@ namespace YarpIngress.YarpIntegration
 
             }
             return this;
+        }
+
+        private IReadOnlyDictionary<string, DestinationConfig> GetDestinations(V1Ingress ingress, V1HTTPIngressPath path, IK8sObjectsDefinitionsProvider serviceDefinitionsProvider)
+        {
+
+            var dict = ingress.YarpAffinity() switch
+            {
+                AffinityMode.Service =>
+                    new Dictionary<string, DestinationConfig>()
+                    {
+                        ["service"] = new DestinationConfig()
+                        {
+                            Address = GetDestinationAddressByServiceName(ingress, path, serviceDefinitionsProvider)
+                        }
+                    },
+                AffinityMode.ServiceCusterIP =>
+                    new Dictionary<string, DestinationConfig>()
+                    {
+                        ["service"] = new DestinationConfig()
+                        {
+                            Address = GetDestinationAddressByServiceClusterIP(ingress, path, serviceDefinitionsProvider)
+                        }
+                    },
+
+                AffinityMode.RandomPod => GetDestinationAddressesByEndpoints(ingress, path, serviceDefinitionsProvider),
+                _ => new Dictionary<string, DestinationConfig>()
+            };
+            return dict;
+
+        }
+
+        private Dictionary<string, DestinationConfig> GetDestinationAddressesByEndpoints(V1Ingress ingress, V1HTTPIngressPath path, IK8sObjectsDefinitionsProvider serviceDefinitionsProvider)
+        {
+            var ns = ingress.SafeNamespace();
+            var endpointName = path.Backend.Service.Name;
+            var endpoints = serviceDefinitionsProvider.GetEndpointsDefinition($"{endpointName}:{ns}");
+            var destinations = new Dictionary<string, DestinationConfig>();
+            foreach (var subset in endpoints.Subsets)
+            {
+                foreach (var address in subset.Addresses) 
+                {
+                    destinations.Add(Guid.NewGuid().ToString(), new DestinationConfig()
+                    {
+                        Address = $"http://{address.Ip}"
+                    });
+                }
+            }
+
+            return destinations;
+        }
+
+        private string GetDestinationAddressByServiceClusterIP(V1Ingress ingress, V1HTTPIngressPath path, IK8sObjectsDefinitionsProvider serviceDefinitionsProvider)
+        {
+            var ns = ingress.SafeNamespace();
+            var serviceName = path.Backend.Service.Name;
+            var svc = serviceDefinitionsProvider.GetServiceDefinition($"{serviceName}:{ns}");
+            var portNumber = path.Backend.Service.Port.Number ?? svc?.PortByName(path.Backend.Service.Port.Name);
+            var ip = svc.Spec.ClusterIP;
+            return $"http://{ip}:{portNumber}";
+        }
+
+        private string GetDestinationAddressByServiceName(V1Ingress ingress, V1HTTPIngressPath path, IK8sObjectsDefinitionsProvider serviceDefinitionsProvider)
+        {
+            var ns = string.IsNullOrEmpty(ingress.Namespace()) ? "default" : ingress.Namespace();
+            var serviceName = path.Backend.Service.Name;
+            var portNumber = path.Backend.Service.Port.Number ?? serviceDefinitionsProvider.GetServiceDefinition(serviceName)?.PortByName(path.Backend.Service.Port.Name);
+            return $"http://{serviceName}.{ns}.svc.cluster.local:{portNumber}";
         }
     }
 
@@ -110,10 +172,10 @@ namespace YarpIngress.YarpIntegration
         }
 
 
-        public void AddIngressDefinition(V1Ingress ingress)
+        public void AddIngressDefinition(V1Ingress ingress, IK8sObjectsDefinitionsProvider serviceDefinitionsProvider)
         {
             var ns = string.IsNullOrEmpty(ingress.Namespace()) ? "default" : ingress.Namespace();
-            var ingressConfig = new IngressConfig().FillDataFrom(ingress);
+            var ingressConfig = new IngressConfig().FillDataFrom(ingress, serviceDefinitionsProvider);
             _ingresses.Add($"{ingress.Name()}:{ns}",  ingressConfig);
             _clusterConfigs.AddRange(ingressConfig.ClusterConfigs);
             _routes.AddRange(ingressConfig.RouteConfigs);

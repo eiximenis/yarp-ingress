@@ -11,7 +11,7 @@ namespace YarpIngress.YarpIntegration
             _yarpConfiguration = new YarpConfiguration();
         }
 
-        public IProxyConfig GetConfig() => _yarpConfiguration.CurrentSnapshot();
+        IProxyConfig IProxyConfigProvider.GetConfig() => _yarpConfiguration.CurrentSnapshot();
 
         public YarpConfiguration GetYarpConfiguration() => _yarpConfiguration;
     }

@@ -7,6 +7,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddSingleton(new YarpConfigurationProvider());
 builder.Services.AddSingleton<IProxyConfigProvider>(sp => sp.GetRequiredService<YarpConfigurationProvider>());
+builder.Services.AddSingleton<IKubernetesClientFactory, KubernetesClientFactory>();
 builder.Services.AddLogging();
 builder.Services.AddHostedService<MainResourcesWatcher>();
 builder.Services.AddReverseProxy();
